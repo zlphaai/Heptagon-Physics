@@ -1,28 +1,275 @@
 <!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Heptagon Physics</title>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>七边形物理模拟 (Heptagon Physics)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-      body {
-        margin: 0;
-        overflow: hidden;
-        background-color: #111827; /* gray-900 */
-      }
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #111827; /* gray-900 */
+            touch-action: none; /* Prevent scrolling on mobile */
+        }
+        canvas {
+            display: block;
+        }
     </style>
-  <script type="importmap">
-{
-  "imports": {
-    "react": "https://aistudiocdn.com/react@^19.2.0",
-    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
-    "react/": "https://aistudiocdn.com/react@^19.2.0/"
-  }
-}
-</script>
 </head>
-  <body>
-    <div id="root"></div>
-  </body>
+<body>
+    <!-- UI Overlay -->
+    <div class="absolute top-4 left-4 z-10 text-white/80 pointer-events-none select-none">
+        <h1 class="text-2xl font-bold">七边形物理模拟</h1>
+        <p class="text-sm opacity-70">20 个球体 • 重力 • 旋转容器</p>
+    </div>
+
+    <canvas id="simCanvas"></canvas>
+
+    <script>
+        // --- Configuration ---
+        const CONFIG = {
+            numBalls: 20,
+            gravity: 0.25,
+            friction: 0.99,
+            wallBounce: 0.6, // Energy retained after hitting wall
+            rotationSpeed: 0.015, // Radians per frame
+            sides: 7,
+            subSteps: 8, // Physics accuracy
+            minRadius: 10,
+            maxRadius: 20
+        };
+
+        // --- Setup ---
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height, centerX, centerY, containerRadius;
+        let rotationAngle = 0;
+        let balls = [];
+
+        // --- Math Helpers ---
+        const vec = (x, y) => ({x, y});
+        const add = (v1, v2) => ({x: v1.x + v2.x, y: v1.y + v2.y});
+        const sub = (v1, v2) => ({x: v1.x - v2.x, y: v1.y - v2.y});
+        const mult = (v, s) => ({x: v.x * s, y: v.y * s});
+        const dot = (v1, v2) => v1.x * v2.x + v1.y * v2.y;
+        const len = (v) => Math.hypot(v.x, v.y);
+        const norm = (v) => {
+            const l = len(v);
+            return l === 0 ? {x: 0, y: 0} : {x: v.x / l, y: v.y / l};
+        };
+        const randomColor = (i, total) => `hsl(${(i * 360) / total}, 70%, 60%)`;
+
+        // --- Initialization ---
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            centerX = width / 2;
+            centerY = height / 2;
+            containerRadius = Math.min(width, height) * 0.42;
+        }
+
+        function initBalls() {
+            balls = [];
+            for (let i = 0; i < CONFIG.numBalls; i++) {
+                balls.push({
+                    id: i + 1,
+                    x: centerX + (Math.random() - 0.5) * 50,
+                    y: centerY + (Math.random() - 0.5) * 50,
+                    vx: (Math.random() - 0.5) * 20,
+                    vy: (Math.random() - 0.5) * 20,
+                    radius: CONFIG.minRadius + Math.random() * (CONFIG.maxRadius - CONFIG.minRadius),
+                    color: randomColor(i, CONFIG.numBalls)
+                });
+            }
+        }
+
+        // --- Physics Engine ---
+        function updatePhysics() {
+            rotationAngle += CONFIG.rotationSpeed;
+
+            // Calculate current vertices of the heptagon
+            const vertices = [];
+            for (let i = 0; i < CONFIG.sides; i++) {
+                const theta = rotationAngle + (i * 2 * Math.PI) / CONFIG.sides;
+                vertices.push({
+                    x: centerX + containerRadius * Math.cos(theta),
+                    y: centerY + containerRadius * Math.sin(theta)
+                });
+            }
+
+            // Sub-stepping for stability
+            const dt = 1 / CONFIG.subSteps;
+
+            for (let step = 0; step < CONFIG.subSteps; step++) {
+                balls.forEach(ball => {
+                    // 1. Gravity & Movement
+                    ball.vy += CONFIG.gravity * dt;
+                    ball.vx *= CONFIG.friction;
+                    ball.vy *= CONFIG.friction;
+                    ball.x += ball.vx * dt;
+                    ball.y += ball.vy * dt;
+
+                    // 2. Wall Collisions
+                    for (let i = 0; i < CONFIG.sides; i++) {
+                        const p1 = vertices[i];
+                        const p2 = vertices[(i + 1) % CONFIG.sides];
+
+                        const wallVec = sub(p2, p1);
+                        const wallUnit = norm(wallVec);
+                        // Normal pointing inward to center
+                        let normal = { x: -wallUnit.y, y: wallUnit.x };
+                        
+                        const mid = mult(add(p1, p2), 0.5);
+                        const toCenter = sub({x: centerX, y: centerY}, mid);
+                        if (dot(normal, toCenter) < 0) {
+                            normal = mult(normal, -1);
+                        }
+
+                        // Distance from ball to infinite line of wall
+                        const toBall = sub({x: ball.x, y: ball.y}, p1);
+                        const dist = dot(toBall, normal);
+
+                        // Check if outside (dist < radius)
+                        // Note: Since normal points inward, positive distance is "inside".
+                        // If dist < ball.radius, the ball is touching or passing through.
+                        if (dist < ball.radius) {
+                            // Only collide if we are within the segment bounds (approx)
+                            // Or simple container logic: just push in.
+                            
+                            // Correct Position
+                            const overlap = ball.radius - dist;
+                            ball.x += normal.x * overlap;
+                            ball.y += normal.y * overlap;
+
+                            // Calculate Wall Velocity at impact point
+                            // V_wall = omega x r_rel
+                            // Position relative to center
+                            const relX = ball.x - centerX;
+                            const relY = ball.y - centerY;
+                            
+                            // Tangential velocity from rotation: (-omega * y, omega * x)
+                            // Note: rotationSpeed is radians per frame.
+                            // We treat 1 frame as 1 unit of time for velocity.
+                            const wallVx = -relY * CONFIG.rotationSpeed;
+                            const wallVy = relX * CONFIG.rotationSpeed;
+
+                            // Relative velocity
+                            const vRelX = ball.vx - wallVx;
+                            const vRelY = ball.vy - wallVy;
+
+                            // Reflect relative velocity
+                            const vRelDotN = vRelX * normal.x + vRelY * normal.y;
+                            
+                            // Only reflect if moving towards wall
+                            if (vRelDotN < 0) {
+                                const j = -(1 + CONFIG.wallBounce) * vRelDotN;
+                                ball.vx = (vRelX + j * normal.x) + wallVx;
+                                ball.vy = (vRelY + j * normal.y) + wallVy;
+                            }
+                        }
+                    }
+
+                    // 3. Ball to Ball Collisions
+                    for (let j = 0; j < balls.length; j++) {
+                        if (ball.id === balls[j].id) continue;
+                        const other = balls[j];
+
+                        const dx = other.x - ball.x;
+                        const dy = other.y - ball.y;
+                        const d = Math.sqrt(dx * dx + dy * dy);
+                        const minDist = ball.radius + other.radius;
+
+                        if (d < minDist) {
+                            // Separation
+                            const n = { x: dx / d, y: dy / d };
+                            const overlap = minDist - d;
+                            const separation = overlap * 0.5;
+                            
+                            ball.x -= n.x * separation;
+                            ball.y -= n.y * separation;
+                            other.x += n.x * separation;
+                            other.y += n.y * separation;
+
+                            // Elastic Bounce
+                            const vRelX = ball.vx - other.vx;
+                            const vRelY = ball.vy - other.vy;
+                            const vn = vRelX * n.x + vRelY * n.y;
+
+                            if (vn > 0) continue; // Moving apart
+
+                            const restitution = 0.8;
+                            const impulse = (-(1 + restitution) * vn) / 2; // Equal mass assumption
+
+                            ball.vx += impulse * n.x;
+                            ball.vy += impulse * n.y;
+                            other.vx -= impulse * n.x;
+                            other.vy -= impulse * n.y;
+                        }
+                    }
+                });
+            }
+        }
+
+        // --- Render Loop ---
+        function draw() {
+            // Background
+            ctx.fillStyle = '#111827';
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw Heptagon
+            ctx.beginPath();
+            for (let i = 0; i < CONFIG.sides; i++) {
+                const theta = rotationAngle + (i * 2 * Math.PI) / CONFIG.sides;
+                const x = centerX + containerRadius * Math.cos(theta);
+                const y = centerY + containerRadius * Math.sin(theta);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.closePath();
+
+            // Glow
+            ctx.strokeStyle = '#60A5FA';
+            ctx.lineWidth = 5;
+            ctx.shadowBlur = 20;
+            ctx.shadowColor = '#3B82F6';
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+
+            // Draw Balls
+            balls.forEach(ball => {
+                ctx.beginPath();
+                ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+                ctx.fillStyle = ball.color;
+                ctx.fill();
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // Text
+                ctx.fillStyle = '#ffffff';
+                ctx.font = `bold ${Math.floor(ball.radius)}px Arial`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(ball.id, ball.x, ball.y);
+            });
+        }
+
+        function loop() {
+            updatePhysics();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        // --- Init ---
+        window.addEventListener('resize', resize);
+        resize();
+        initBalls();
+        loop();
+
+    </script>
+</body>
 </html>
