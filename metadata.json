@@ -1,0 +1,5 @@
+{
+  "name": "Heptagon Physics",
+  "description": "A physics simulation of 20 numbered balls bouncing inside a rotating heptagon with gravity and collision detection.",
+  "requestFramePermissions": []
+}
